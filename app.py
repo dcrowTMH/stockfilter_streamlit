@@ -44,11 +44,12 @@ def main():
     path = 'public/data'
     latest_file, latest_time = get_latest_csv_file(path)
     data_path = os.path.join(path, latest_file)
+    file_time = latest_file.split('_')[0]
     # read the data
     data = pd.read_csv(data_path)
     # simple display on the data
     st.title(f"VCP filtering")
-    st.write(f'data updated at: {dt.fromtimestamp(latest_time).strftime('%Y-%m-%d')}')
+    st.write(f'data updated at: {file_time}')
     st.write('Here is a result DataFrame:')
     st.dataframe(data)
 
