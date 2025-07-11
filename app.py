@@ -52,6 +52,7 @@ def main():
     st.write(f'data updated at: {file_time}')
     st.write('Here is a result DataFrame:')
     st.dataframe(data)
+    st.write('Disclaimer: These analysis is for self-taghut & self-reference only.')
 
 
 if __name__ == "__main__":
