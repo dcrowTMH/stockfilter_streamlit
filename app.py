@@ -67,7 +67,8 @@ def main():
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Latest Data - from **{latest_file}** (updated at: {file_time_str})")
+        st.subheader(
+            f"Latest Data - from **{latest_file}** (updated at: {file_time_str})")
         st.dataframe(latest_data)
 
     with col2:
@@ -121,7 +122,7 @@ def main():
                     how='inner',
                     suffixes=('_latest', '_selected')
                 ))
-    
+
     st.markdown("---")
     # Footer
     st.write('Disclaimer: These analyses are for self-taught & self-reference only.')
