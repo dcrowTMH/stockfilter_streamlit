@@ -1,33 +1,27 @@
+# Python Code/stockfilter_streamlit/app.py
 import os
 import re
 from datetime import datetime as dt
 from typing import List, Optional, Tuple
 
+import imageio
+import numpy as np
 import pandas as pd
 import streamlit as st
+
 
 # -------------------------
 # Helper functions
 # -------------------------
-
-
 def get_latest_csv_file(directory_path: str) -> Tuple[Optional[str], Optional[float]]:
-    """
-    Get the latest csv path from the target directory path based on modification time.
-
-    Returns:
-        (latest_filename, modification_time) or (None, None) if no csv found.
-    """
+    """Return the latest CSV file (by mtime) in directory_path."""
     if not os.path.isdir(directory_path):
         return None, None
-
-    csv_files = [f for f in os.listdir(directory_path) if f.endswith(".csv")]
+    csv_files = [f for f in os.listdir(directory_path) if f.lower().endswith(".csv")]
     if not csv_files:
         return None, None
-
     latest_file = None
     latest_time = 0.0
-
     for csv_file in csv_files:
         file_path = os.path.join(directory_path, csv_file)
         try:
@@ -37,80 +31,53 @@ def get_latest_csv_file(directory_path: str) -> Tuple[Optional[str], Optional[fl
         if file_time > latest_time:
             latest_time = file_time
             latest_file = csv_file
-
     return latest_file, latest_time
 
 
 def get_all_csv_files(directory_path: str) -> List[str]:
-    """Return a list of CSV files in directory (or empty list)."""
+    """Return list of CSV filenames in directory_path (or empty list)."""
     if not os.path.isdir(directory_path):
         return []
-    return [f for f in os.listdir(directory_path) if f.endswith(".csv")]
+    return [f for f in os.listdir(directory_path) if f.lower().endswith(".csv")]
 
 
-def find_latest_rrg_gif_by_filename(gif_dir: str) -> Tuple[Optional[str], Optional[dt]]:
+def list_rrg_gifs(gif_dir: str) -> List[Tuple[str, Optional[dt]]]:
     """
-    Search the gif_dir for RRG GIFs using filename date pattern and return the latest.
-
-    Expected filename patterns (examples):
-      SPY_rrg_all_sma_20251125.gif
-      SPY_rrg_all_slope_20251125.gif
-
-    The function will:
-    - try to parse YYYYMMDD from filenames using a regex,
-    - pick the entry with the newest parsed date,
-    - fall back to latest modification time if no date-formatted names are found.
-
-    Returns:
-        (path_to_latest_gif, parsed_date_or_mtime_datetime) or (None, None)
+    List GIF files in gif_dir and attempt to parse YYYYMMDD from their filenames.
+    Returns list of tuples: (filename, parsed_date_or_None).
     """
+    out = []
     if not os.path.isdir(gif_dir):
-        return None, None
-
+        return out
     gif_files = [f for f in os.listdir(gif_dir) if f.lower().endswith(".gif")]
-    if not gif_files:
-        return None, None
-
-    pattern = re.compile(r".*_(\d{8})\.gif$")
-    candidates = []
+    date_pattern = re.compile(r"(\d{8})")
     for f in gif_files:
-        m = pattern.search(f)
+        parsed_date = None
+        m = date_pattern.search(f)
         if m:
             try:
-                dt_val = dt.strptime(m.group(1), "%Y%m%d")
-                candidates.append((f, dt_val))
+                parsed_date = dt.strptime(m.group(1), "%Y%m%d")
             except Exception:
-                # ignore parse errors
-                pass
+                parsed_date = None
+        out.append((f, parsed_date))
 
-    if candidates:
-        # pick the file with the newest parsed date
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        chosen = candidates[0][0]
-        return os.path.join(gif_dir, chosen), candidates[0][1]
-
-    # fallback to modification time
-    latest_file = None
-    latest_mtime = 0.0
-    for f in gif_files:
-        fp = os.path.join(gif_dir, f)
+    # sort by parsed_date desc then by mtime desc as fallback
+    def sort_key(item):
+        fname, pdx = item
+        if pdx:
+            return (0, pdx)  # parsed dates first
+        # fallback: mtime
         try:
-            mtime = os.path.getmtime(fp)
+            mtime = os.path.getmtime(os.path.join(gif_dir, fname))
         except Exception:
-            continue
-        if mtime > latest_mtime:
-            latest_mtime = mtime
-            latest_file = f
-    if latest_file:
-        return os.path.join(gif_dir, latest_file), dt.fromtimestamp(latest_mtime)
-    return None, None
+            mtime = 0
+        return (1, dt.fromtimestamp(mtime))
+
+    out_sorted = sorted(out, key=sort_key, reverse=True)
+    return out_sorted
 
 
 def build_sector_reference(symbols: List[str]) -> pd.DataFrame:
-    """
-    Return a DataFrame with Symbol and Sector columns for known SPDR sector ETF tickers.
-    The mapping below covers the standard SPDR sector tickers provided.
-    """
     sector_map = {
         "XLRE": "Real Estate",
         "XLF": "Financials",
@@ -124,137 +91,172 @@ def build_sector_reference(symbols: List[str]) -> pd.DataFrame:
         "XLU": "Utilities",
         "XLE": "Energy",
     }
-    rows = []
-    for s in symbols:
-        rows.append({"Symbol": s, "Sector": sector_map.get(s, "Unknown")})
+    rows = [{"Symbol": s, "Sector": sector_map.get(s, "Unknown")} for s in symbols]
     return pd.DataFrame(rows)
 
 
-# -------------------------
-# Main Streamlit app
-# -------------------------
+def read_gif_frames(gif_path: str) -> List[np.ndarray]:
+    """
+    Read frames from a GIF using imageio.
+    Returns list of numpy arrays (H,W,3) for frames (RGB).
+    """
+    try:
+        frames = imageio.mimread(gif_path)
+        # imageio sometimes returns rgba; normalize to rgb uint8 arrays
+        norm_frames = []
+        for fr in frames:
+            arr = np.asarray(fr)
+            if arr.ndim == 3 and arr.shape[2] == 4:
+                arr = arr[:, :, :3]
+            elif arr.ndim == 2:
+                arr = np.stack([arr] * 3, axis=2)
+            # ensure dtype uint8
+            if arr.dtype != np.uint8:
+                arr = (
+                    (255 * (arr.astype(float) / arr.max())).astype(np.uint8)
+                    if arr.max()
+                    else arr.astype(np.uint8)
+                )
+            norm_frames.append(arr)
+        return norm_frames
+    except Exception:
+        return []
 
 
+# -------------------------
+# Streamlit app
+# -------------------------
 def main():
     st.set_page_config(layout="wide", page_title="Stockfilter Streamlit Dashboard")
-
     st.title("Stockfilter Dashboard")
+
     st.markdown(
         "This page shows the latest VCP CSV data and a visual RRG GIF (if available) with sector reference."
     )
     st.markdown("---")
 
-    # --- CSV area (existing functionality) ---
-    data_path = os.path.join("public", "data")
-    all_files = get_all_csv_files(data_path)
+    # -------------------------
+    # CSV area (left top)
+    # -------------------------
+    data_dir = os.path.join("public", "data")
+    all_csvs = get_all_csv_files(data_dir)
+    latest_csv_file, latest_csv_time = get_latest_csv_file(data_dir)
 
-    if not all_files:
-        st.error(f"No CSV files found in the '{data_path}' directory.")
-        # We will still allow RRG GIF display below if available, so do not stop.
-        latest_file = None
-        latest_time = None
-        latest_data = pd.DataFrame()
-        selected_data = None
+    if latest_csv_file:
+        try:
+            latest_csv = pd.read_csv(os.path.join(data_dir, latest_csv_file))
+        except Exception as e:
+            latest_csv = pd.DataFrame()
+            st.error(f"Failed to load latest CSV ({latest_csv_file}): {e}")
     else:
-        latest_file, latest_time = get_latest_csv_file(data_path)
-        latest_data = (
-            pd.read_csv(os.path.join(data_path, latest_file))
-            if latest_file
-            else pd.DataFrame()
-        )
+        latest_csv = pd.DataFrame()
 
-        # Side-by-side CSV display
-        st.subheader("Latest VCP Data")
-        file_time_str = (
-            dt.fromtimestamp(latest_time).strftime("%Y-%m-%d %H:%M:%S")
-            if latest_time
-            else "N/A"
-        )
+    col_csv_left, col_csv_right = st.columns(2)
 
-        col_csv_left, col_csv_right = st.columns(2)
-
-        with col_csv_left:
-            if latest_file:
-                st.write(
-                    f"Latest file: **{latest_file}** (updated at: {file_time_str})"
-                )
-                st.dataframe(latest_data)
-            else:
-                st.info("No latest CSV available.")
-
-        with col_csv_right:
-            st.subheader("Comparison Data")
-            comparison_files = [f for f in all_files if f != latest_file]
-            if not comparison_files:
-                st.info("No other files available for comparison.")
-                selected_data = None
-            else:
-                selected_filename = st.selectbox(
-                    "Select a file to compare with:", options=comparison_files
-                )
-                selected_data_path = os.path.join(data_path, selected_filename)
-                try:
-                    selected_data = pd.read_csv(selected_data_path)
-                    st.dataframe(selected_data)
-                except Exception as e:
-                    st.error(f"Failed to load {selected_filename}: {e}")
-                    selected_data = None
-
-        # Common symbols area
-        st.markdown("---")
-        st.subheader("Symbols Present in Both Datasets")
-        if selected_data is not None and not latest_data.empty:
-            key_column = "symbol"
-            if (
-                key_column not in latest_data.columns
-                or key_column not in selected_data.columns
-            ):
-                st.warning(
-                    f"The key column '{key_column}' was not found in one or both of the files."
-                )
-            else:
-                merged = pd.merge(
-                    latest_data,
-                    selected_data,
-                    on=key_column,
-                    how="inner",
-                    suffixes=("_latest", "_selected"),
-                )
-                if merged.empty:
-                    st.info("No common symbols found between the two selected files.")
-                else:
-                    st.write(f"Found {len(merged)} common symbols.")
-                    st.dataframe(merged)
+    with col_csv_left:
+        st.subheader("Latest VCP CSV")
+        if latest_csv_file:
+            ts = (
+                dt.fromtimestamp(latest_csv_time).strftime("%Y-%m-%d %H:%M:%S")
+                if latest_csv_time
+                else "N/A"
+            )
+            st.write(f"Latest file: **{latest_csv_file}** (updated: {ts})")
+            st.dataframe(latest_csv)
         else:
-            st.info("Comparison disabled or not enough data for comparison.")
+            st.info(f"No CSV files found in {data_dir}")
 
-    # --- RRG GIF + Sector Reference section ---
+    with col_csv_right:
+        st.subheader("Comparison CSV")
+        comparison_files = [f for f in all_csvs if f != latest_csv_file]
+        if comparison_files:
+            sel = st.selectbox("Select a CSV to compare", options=comparison_files)
+            try:
+                df_sel = pd.read_csv(os.path.join(data_dir, sel))
+                st.dataframe(df_sel)
+            except Exception as e:
+                st.error(f"Failed to load {sel}: {e}")
+        else:
+            st.info("No other CSVs available for comparison")
+
     st.markdown("---")
-    st.subheader("RRG GIF (latest) and Sector Reference")
+
+    # -------------------------
+    # RRG GIF area
+    # -------------------------
+    st.subheader("RRG Animation and Sector Reference")
 
     gif_dir = os.path.join("public", "data", "rrg_gif")
-    gif_path, gif_date = find_latest_rrg_gif_by_filename(gif_dir)
+    # Controls: Refresh button, GIF selectbox, Pause checkbox, Frame slider when paused
+    control_col, display_col = st.columns([1, 3])
 
-    # Left (GIF) and Right (Sector table)
-    left_col, right_col = st.columns([2, 1])
+    # Refresh button: force re-scan of files (we call st.experimental_rerun to refresh UI)
+    with control_col:
+        if st.button("Refresh GIF list"):
+            # Force a rerun so list_rrg_gifs updates
+            st.experimental_rerun()
 
-    with left_col:
-        st.markdown("### Latest RRG Animation")
-        if gif_path and os.path.exists(gif_path):
-            # Display GIF
-            try:
-                # Show a caption with parsed date
-                caption = f"File: {os.path.basename(gif_path)}"
-                if isinstance(gif_date, dt):
-                    caption += f" — date: {gif_date.strftime('%Y-%m-%d')}"
-                st.image(gif_path, use_container_width=True, caption=caption)
-            except Exception as e:
-                st.error(f"Failed to display GIF: {e}")
+    # Gather GIF files (sorted)
+    gif_items = list_rrg_gifs(gif_dir)  # list of (filename, parsed_date)
+    gif_filenames = [f for f, _ in gif_items]
+
+    if not gif_filenames:
+        st.info(f"No GIF files found in {gif_dir}")
+        # still show sector table on the right in the layout below
+        selected_gif = None
+    else:
+        # Provide dropdown for selecting older gifs. Default is first item (most recent).
+        selected = st.selectbox(
+            "Choose GIF (most recent first)", options=gif_filenames, index=0
+        )
+        selected_gif = os.path.join(gif_dir, selected)
+
+    # Playback controls
+    pause_checkbox = st.checkbox(
+        "Pause animation (show static frame & manual frame slider)", value=False
+    )
+    auto_refresh_checkbox = st.checkbox(
+        "Auto-refresh GIF on page reload (no-op for now)",
+        value=False,
+        help="When checked the app will still need a manual refresh trigger to rescan files; this checkbox is here for UX parity.",
+    )
+
+    # Display area
+    with display_col:
+        if selected_gif and os.path.exists(selected_gif):
+            st.markdown(f"**Selected GIF:** `{os.path.basename(selected_gif)}`")
+            if pause_checkbox:
+                # Read frames and show first frame + slider to navigate
+                frames = read_gif_frames(selected_gif)
+                if not frames:
+                    st.error("Failed to read frames from the GIF.")
+                else:
+                    n_frames = len(frames)
+                    # choose a default start frame (last frame to represent latest)
+                    default_idx = n_frames - 1
+                    frame_idx = st.slider(
+                        "Frame", min_value=0, max_value=n_frames - 1, value=default_idx
+                    )
+                    # show the selected static frame
+                    try:
+                        st.image(frames[frame_idx], use_column_width=True)
+                        st.caption(f"Frame {frame_idx + 1} / {n_frames}")
+                    except Exception as e:
+                        st.error(f"Failed to render frame: {e}")
+            else:
+                # show the animated gif directly
+                try:
+                    st.image(selected_gif, use_container_width=True)
+                    st.caption("Playing animation (GIF)")
+                except Exception as e:
+                    st.error(f"Failed to display GIF: {e}")
         else:
-            st.info(f"No RRG GIF found in: {gif_dir}")
+            st.info("No GIF selected or file not found.")
 
-    with right_col:
-        st.markdown("### Sector Reference (SPDR Sector ETFs)")
+    # Right column: Sector reference (fixed list)
+    right_wrapper = st.container()
+    with right_wrapper:
+        st.markdown("### Sector reference (SPDR Sector ETFs)")
         symbols = [
             "XLRE",
             "XLF",
